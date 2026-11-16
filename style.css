@@ -52,3 +52,11 @@ pre { margin: 0 0 12px; font: 14px/1.5 ui-monospace, monospace; white-space: pre
 code { font: 14px ui-monospace, monospace; }
 footer { margin-top: 32px; font-size: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
 a { color: var(--accent); }
+#preview { margin-top: 16px; }
+.stills { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.stills figure { margin: 0; }
+.stills img { display: block; width: 100%; height: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; }
+.stills figcaption { font-size: 13px; color: var(--muted); }
+#estimate { margin: 8px 0 0; font-weight: 600; }
+#preview[data-state="running"] #estimate, #preview[data-state="pending"] #estimate { color: var(--muted); font-weight: 400; }
+#estimate-warning { margin-top: 8px; }

@@ -8,7 +8,8 @@ https://syndicate-black-ops.github.io/video-converter/
 ## Use
 
 1. Drop a video on the page
-2. Change the settings if you want to, and click Convert
+2. Change the settings if you want to: the preview shows how the file will look and about how big it will be. Then click
+   Convert
 3. Click Save, and put the file in your map's folder in `Half-Life/syndicate/video`
 
 The [Video page](https://sbo.sbotnas.io/mapping/features/video#making-a-video-file) of the docs

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self' blob: data:; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' blob: data:; object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>Syndicate Black Ops video converter</title>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="style.css">
@@ -46,6 +46,12 @@
     <li class="video-only"><strong>Bitrate</strong> sets the file size: 1100 makes about 8.5 MB per minute, 600 about 4.7 MB</li>
     <li><strong>Sound quality</strong> goes from 0 to 10, and 3 is about 112 kbit/s</li>
   </ul>
+
+  <section id="preview" data-state="none" hidden>
+    <div id="stills" class="stills"></div>
+    <p id="estimate"></p>
+    <p id="estimate-warning" class="warning" hidden></p>
+  </section>
 
   <div class="actions">
     <button id="convert" class="button" type="button" disabled>Convert</button>

@@ -1,5 +1,6 @@
 // Page logic: read the chosen file with ffmpeg.wasm, convert it to Ogg Theora + Vorbis (.ogv) or Vorbis (.ogg) with
 // the same ffmpeg command as the docs' "Making a video file", show progress, and offer the result as a download.
+// A preview encodes short samples with the same command in their own ffmpeg instances, for stills and a size estimate.
 import { FFmpeg } from './vendor/ffmpeg/index.js';
 
 const CORE_URL = new URL('vendor/core/ffmpeg-core.js', location.href).href;
@@ -27,6 +28,7 @@ const modeSel = $('mode'), widthIn = $('width'), fpsIn = $('fps'), bitrateIn = $
 const convertBtn = $('convert'), cancelBtn = $('cancel');
 const progressBox = $('progress-box'), progressBar = $('progress'), progressText = $('progress-text');
 const status = $('status'), result = $('result'), info = $('info'), sizeWarning = $('size-warning'), saveBtn = $('save');
+const previewBox = $('preview'), stillsBox = $('stills'), estimateText = $('estimate'), estimateWarning = $('estimate-warning');
 
 let ffmpeg = null;      // loaded FFmpeg, or null
 let file = null;        // the chosen File
@@ -36,6 +38,23 @@ let busy = false;
 let canceled = false;
 let logLines = [];
 let onTime = null;      // progress callback while a pass runs
+const previewWorkers = []; // {ff, file, sample} per preview sample
+let previewToken = 0;   // a newer preview makes older ones stop
+let previewRunning = false;
+let previewAgain = false; // settings changed while a preview ran
+let previewTimer = null;
+let stillURLs = [];
+// Preview samples at the start, a third and two thirds into the video; 0.8 s is the shortest that keeps the size
+// estimate within 25% on hard-to-encode videos (Theora's rate control needs that long to settle)
+const SAMPLE_SECONDS = 0.8;
+const SAMPLE_POINTS = [0, 1 / 3, 2 / 3];
+const AUDIO_SAMPLE_SECONDS = 5;
+const PREVIEW_DELAY_MS = 600;
+// A decoded sample is kept uncompressed (fast to read again, and lossless codecs need far more memory at 4K); its
+// length is cut so that it stays under this size
+const RAW_SAMPLE_BYTES = 160 * 1024 * 1024;
+// Sources with bigger frames than this (more than 1080p) decode their samples one after the other, to save memory
+const BIG_FRAME_BYTES = 4 * 1024 * 1024;
 
 function setStatus(text, kind) {
   status.textContent = text;
@@ -121,7 +140,19 @@ function readInfo(lines) {
 async function readFileInfo(f, path) {
   logLines = [];
   await f.exec(['-hide_banner', '-i', path]);
-  return readInfo(logLines);
+  const info = readInfo(logLines);
+  if (info.duration == null && (info.video || info.audio)) {
+    // No length in the file (browser recordings): read it through once without decoding
+    logLines = [];
+    await f.exec(['-hide_banner', '-i', path, '-map', '0', '-c', 'copy', '-f', 'null', '-']);
+    let last = null;
+    for (const line of logLines) {
+      const t = /time=\s*(\d+):(\d+):([\d.]+)/.exec(line);
+      if (t) last = parseTime(t[1], t[2], t[3]);
+    }
+    if (last) info.duration = last;
+  }
+  return info;
 }
 
 function describe(p) {
@@ -168,15 +199,224 @@ function settings() {
   return s;
 }
 
-function commands(s, input) {
+function videoFilter(s) {
+  return 'scale=' + s.width + ':-2' + (s.fps ? ',fps=' + s.fps : '');
+}
+
+// The ffmpeg runs for the settings; a preview sample passes its start and length as `cut` (input options), and
+// `filtered` when its input already went through the picture filter
+function commands(s, input, out = '/work/out', cut = [], passlog = '/work/pass', filtered = false) {
   const audio = ['-c:a', 'libvorbis', '-q:a', String(s.quality), '-ac', '2', '-ar', '44100'];
-  if (s.mode === 'audio') return [['-y', '-i', input, '-vn', ...audio, '/work/out.ogg']];
-  const vf = 'scale=' + s.width + ':-2' + (s.fps ? ',fps=' + s.fps : '');
-  const video = ['-vf', vf, '-c:v', 'libtheora', '-b:v', s.bitrate + 'k'];
+  if (s.mode === 'audio') return [['-y', ...cut, '-i', input, '-vn', ...audio, out + '.ogg']];
+  const video = [...(filtered ? [] : ['-vf', videoFilter(s)]), '-c:v', 'libtheora', '-b:v', s.bitrate + 'k'];
   return [
-    ['-y', '-i', input, ...video, '-pass', '1', '-passlogfile', '/work/pass', '-an', '-f', 'ogg', '/dev/null'],
-    ['-y', '-i', input, ...video, '-pass', '2', '-passlogfile', '/work/pass', ...audio, '/work/out.ogv'],
+    ['-y', ...cut, '-i', input, ...video, '-pass', '1', '-passlogfile', passlog, '-an', '-f', 'ogg', '/dev/null'],
+    ['-y', ...cut, '-i', input, ...video, '-pass', '2', '-passlogfile', passlog, ...audio, out + '.ogv'],
   ];
+}
+
+// Bytes of the Ogg header pages (granule position 0, before any data), which a file has once whatever its length
+function oggHeaderBytes(data) {
+  let pos = 0;
+  while (pos + 27 <= data.length && data[pos] === 0x4f && data[pos + 1] === 0x67 && data[pos + 2] === 0x67 && data[pos + 3] === 0x53) {
+    let granuleZero = true;
+    for (let i = 6; i < 14; i++) if (data[pos + i] !== 0) granuleZero = false;
+    if (!granuleZero) break;
+    const segments = data[pos + 26];
+    let size = 27 + segments;
+    for (let i = 0; i < segments; i++) size += data[pos + 27 + i];
+    pos += size;
+  }
+  return pos;
+}
+
+// At least one keyframe interval of the output (12 frames) per sample; sound alone is cheap, so it gets more
+function sampleSeconds(s) {
+  if (s.mode === 'audio') return AUDIO_SAMPLE_SECONDS;
+  const length = Math.max(SAMPLE_SECONDS, 12 / (s.fps || probe.fps || 30));
+  return Math.min(length, RAW_SAMPLE_BYTES / (frameBytes() * (probe.fps || 30)));
+}
+
+function frameBytes() {
+  return probe.width * probe.height * 1.5;
+}
+
+let decodeQueue = Promise.resolve();
+
+function samplePoints(duration, length) {
+  if (!duration) return [[0, length]];
+  if (duration <= length * SAMPLE_POINTS.length) return [[0, duration]];
+  return SAMPLE_POINTS.map((p) => [Math.min(duration * p, duration - length), length]);
+}
+
+function clearPreview(state) {
+  for (const u of stillURLs) URL.revokeObjectURL(u);
+  stillURLs = [];
+  stillsBox.replaceChildren();
+  estimateText.textContent = '';
+  estimateWarning.hidden = true;
+  delete estimateText.dataset.bytes;
+  delete previewBox.dataset.seconds;
+  previewBox.dataset.state = state;
+  previewBox.hidden = state === 'invalid' || state === 'none';
+}
+
+// Ends the preview workers (and their decoded samples); used for a new file and before a conversion
+function stopPreview() {
+  previewToken++;
+  clearTimeout(previewTimer);
+  previewAgain = false;
+  if (previewRunning) {
+    for (const w of previewWorkers) if (w) w.ff.terminate();
+    previewWorkers.length = 0;
+  }
+  previewRunning = false;
+}
+
+// A setting changed: a running preview finishes (keeping its decoded samples), then the newest settings run
+function schedulePreview(delay = PREVIEW_DELAY_MS) {
+  if (!probe || busy) return;
+  clearTimeout(previewTimer);
+  previewBox.dataset.state = 'pending';
+  previewTimer = setTimeout(() => {
+    if (previewRunning) previewAgain = true; else runPreview();
+  }, delay);
+}
+
+function log(message) {
+  if (DEBUG) console.log('[preview] ' + message);
+}
+
+// One ffmpeg per sample, so the samples run side by side; each keeps its decoded sample for later settings
+async function previewWorker(i) {
+  let w = previewWorkers[i];
+  if (!w) {
+    const ff = new FFmpeg();
+    if (DEBUG) ff.on('log', ({ message }) => console.log('[preview ' + i + '] ' + message));
+    await ff.load({ coreURL: CORE_URL, wasmURL: WASM_URL });
+    await ff.createDir('/in');
+    await ff.createDir('/work');
+    w = previewWorkers[i] = { ff, file: null, sample: null };
+  }
+  if (w.file !== file) {
+    try { await w.ff.unmount('/in'); } catch (e) { /* nothing mounted yet */ }
+    await w.ff.mount('WORKERFS', { files: [file] }, '/in');
+    w.file = file;
+    w.sample = null;
+  }
+  return w;
+}
+
+async function exec(w, args) {
+  const t0 = performance.now();
+  const code = await w.ff.exec(args);
+  log(Math.round(performance.now() - t0) + ' ms: ' + args.join(' '));
+  if (code !== 0) throw new Error('ffmpeg stopped with code ' + code);
+}
+
+// Encodes one sample with the settings; the source is decoded once into an uncompressed (or lossless) file at its
+// own size, and every later setting only runs the filter and the encoder on it
+async function previewSample(i, s, start, length, token) {
+  const w = await previewWorker(i);
+  const key = start.toFixed(3) + '+' + length.toFixed(3);
+  if (w.sample !== key) {
+    const decode = () => exec(w, ['-y', '-ss', start.toFixed(3), '-t', length.toFixed(3), '-i', '/in/' + file.name,
+      '-c:v', 'rawvideo', '-c:a', 'pcm_f32le', '-f', 'nut', '/work/sample.nut']);
+    if (frameBytes() > BIG_FRAME_BYTES) {
+      const turn = decodeQueue.then(decode);
+      decodeQueue = turn.catch(() => {});
+      await turn;
+    } else {
+      await decode();
+    }
+    w.sample = key;
+  }
+  if (token !== previewToken) return null;
+  for (const run of commands(s, '/work/sample.nut', '/work/out', [], '/work/pass')) {
+    await exec(w, run);
+    if (token !== previewToken) return null;
+  }
+  const out = s.mode === 'audio' ? '/work/out.ogg' : '/work/out.ogv';
+  const bytes = await w.ff.readFile(out);
+  let png = null;
+  if (s.mode === 'video') {
+    await exec(w, ['-y', '-ss', (length / 2).toFixed(3), '-i', out, '-frames:v', '1', '/work/still.png']);
+    png = await w.ff.readFile('/work/still.png');
+  }
+  return { start, length, bytes, png };
+}
+
+async function runPreview() {
+  if (!probe || busy) return;
+  let s;
+  try {
+    s = settings();
+  } catch (e) {
+    clearPreview('invalid');
+    return;
+  }
+  const token = ++previewToken;
+  previewRunning = true;
+  previewAgain = false;
+  const started = performance.now();
+  previewBox.hidden = false;
+  previewBox.dataset.state = 'running';
+  if (!stillsBox.children.length) estimateText.textContent = 'Preview...';
+  try {
+    const points = samplePoints(probe.duration, sampleSeconds(s));
+    const samples = await Promise.all(points.map(([start, length], i) => previewSample(i, s, start, length, token)));
+    if (token !== previewToken || samples.includes(null)) return;
+    let data = 0, seconds = 0, header = 0;
+    for (const u of stillURLs) URL.revokeObjectURL(u);
+    stillURLs = [];
+    stillsBox.replaceChildren();
+    for (const sm of samples) {
+      const h = oggHeaderBytes(sm.bytes);
+      header = Math.max(header, h);
+      data += sm.bytes.length - h;
+      seconds += sm.length;
+      if (!sm.png) continue;
+      const url = URL.createObjectURL(new Blob([sm.png], { type: 'image/png' }));
+      stillURLs.push(url);
+      const fig = document.createElement('figure');
+      const img = document.createElement('img');
+      img.alt = 'Preview at ' + clock(sm.start);
+      img.width = s.width;
+      img.height = s.height;
+      img.addEventListener('load', () => { img.dataset.size = img.naturalWidth + 'x' + img.naturalHeight; });
+      img.src = url;
+      const cap = document.createElement('figcaption');
+      cap.textContent = clock(sm.start);
+      fig.append(img, cap);
+      stillsBox.append(fig);
+    }
+    const estimate = probe.duration ? header + (data / seconds) * probe.duration : null;
+    const picture = s.mode === 'video' ? ', ' + s.width + ' x ' + s.height + (s.fps ? ' at ' + s.fps + ' fps' : '') : '';
+    estimateText.textContent = (estimate ? 'About ' + mb(estimate) : 'Unknown size') + picture;
+    if (estimate) estimateText.dataset.bytes = String(Math.round(estimate)); else delete estimateText.dataset.bytes;
+    previewBox.dataset.seconds = ((performance.now() - started) / 1000).toFixed(1);
+    estimateWarning.hidden = true;
+    if (estimate > MAX_BYTES) {
+      estimateWarning.textContent = 'This is over the 128 MB the game plays. A lower bitrate makes the file smaller.';
+      estimateWarning.hidden = false;
+    } else if (estimate > SERVER_SEND_BYTES) {
+      estimateWarning.textContent = sizeWarning.textContent;
+      estimateWarning.hidden = false;
+    }
+    previewBox.dataset.state = previewAgain ? 'pending' : 'done';
+  } catch (e) {
+    if (token !== previewToken) return;
+    clearPreview('error');
+    previewBox.hidden = false;
+    estimateText.textContent = 'No preview: ' + e.message;
+    for (const w of previewWorkers) if (w) w.ff.terminate();
+    previewWorkers.length = 0;
+  } finally {
+    if (token === previewToken) {
+      previewRunning = false;
+      if (previewAgain) runPreview();
+    }
+  }
 }
 
 function setBusy(on) {
@@ -195,6 +435,8 @@ function showMode() {
 
 async function choose(f) {
   if (busy || !f) return;
+  stopPreview();
+  clearPreview('none');
   file = f;
   probe = null;
   result.hidden = true;
@@ -214,6 +456,7 @@ async function choose(f) {
     if (probe.codec === 'av1') note = AV1_TEXT;
     if (probe.duration > 60) note = 'Long videos take a while: a minute of 1080p at 60 fps takes about 12 minutes. A smaller width or 30 fps is faster, and so is Chrome or Edge.';
     setStatus(note, probe.codec === 'av1' ? 'error' : '');
+    schedulePreview(0);
   } catch (e) {
     probe = null;
     setStatus('Could not read ' + f.name + ': ' + e.message, 'error');
@@ -232,12 +475,19 @@ async function convert() {
   }
   result.hidden = true;
   canceled = false;
+  const previewDone = previewBox.dataset.state === 'done';
+  stopPreview();
+  // The conversion gets the memory and processor time of the preview's ffmpeg instances
+  for (const w of previewWorkers) if (w) w.ff.terminate();
+  previewWorkers.length = 0;
+  if (!previewDone) clearPreview('none');
   setBusy(true);
   setStatus('');
   progressBar.value = 0;
   progressText.textContent = 'Starting...';
   const started = performance.now();
   const runs = commands(s, '/in/' + file.name);
+  const afterRun = () => { if (!previewDone) schedulePreview(); };
   const shares = runs.length === 2 ? [PASS1_SHARE, 1 - PASS1_SHARE] : [1];
   try {
     const ff = await loadFFmpeg();
@@ -286,9 +536,11 @@ async function convert() {
     }
     result.hidden = false;
     setBusy(false);
+    afterRun();
   } catch (e) {
     onTime = null;
     setBusy(false);
+    afterRun();
     if (canceled) return;
     setStatus('The conversion failed: ' + e.message, 'error');
     // A failed run can leave the ffmpeg instance unusable, so the next run starts a new one
@@ -329,7 +581,8 @@ drop.addEventListener('drop', (e) => {
   if (e.dataTransfer.files.length) choose(e.dataTransfer.files[0]);
 });
 picker.addEventListener('change', () => { if (picker.files.length) choose(picker.files[0]); picker.value = ''; });
-modeSel.addEventListener('change', showMode);
+modeSel.addEventListener('change', () => { showMode(); schedulePreview(); });
+for (const el of [widthIn, fpsIn, bitrateIn, qualityIn]) el.addEventListener('input', () => schedulePreview());
 convertBtn.addEventListener('click', convert);
 cancelBtn.addEventListener('click', cancel);
 saveBtn.addEventListener('click', save);
