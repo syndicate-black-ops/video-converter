@@ -3,6 +3,7 @@
 // ONLY_VARIANTS=1 converts only the extra videos.
 import { chromium, firefox } from 'playwright';
 import path from 'node:path';
+import fs from 'node:fs';
 
 const [url, input, out, noisy, ...variants] = process.argv.slice(2);
 const origin = new URL(url).origin;
@@ -25,10 +26,21 @@ async function choose(page, f = input) {
   return page.textContent('#source');
 }
 
+// Waits for the preview of the current settings; returns its time and size estimate
+async function previewDone(page) {
+  await page.waitForSelector('#preview[data-state="done"], #preview[data-state="invalid"], #preview[data-state="error"], #preview[data-state="none"]',
+    { state: 'attached', timeout: 1200000 });
+  const est = await page.getAttribute('#estimate', 'data-bytes');
+  return { estimate: est ? Number(est) : null, previewSeconds: Number(await page.getAttribute('#preview', 'data-seconds')) || null,
+    stills: await page.locator('#stills img').count(), previewText: await page.textContent('#estimate'),
+    stillSizes: await Promise.all((await page.locator('#stills img').all()).map((i) => i.getAttribute('data-size'))) };
+}
+
 async function convert(page, name, opts) {
   for (const [id, v] of Object.entries(opts)) {
     if (id === 'mode') await page.selectOption('#mode', v); else await page.fill('#' + id, String(v));
   }
+  const pv = await previewDone(page);
   const t0 = Date.now();
   const samples = [];
   await page.click('#convert');
@@ -40,7 +52,13 @@ async function convert(page, name, opts) {
   const [dl] = await Promise.all([page.waitForEvent('download'), page.click('#save')]);
   const file = path.join(out, name.replace(/\W+/g, '_') + '--' + dl.suggestedFilename());
   await dl.saveAs(file);
-  report.runs.push({ name, opts, seconds: (Date.now() - t0) / 1000, file, info: await page.textContent('#info'), warning: await page.isVisible('#size-warning'), progress: samples.filter((s, i, a) => s && s !== a[i - 1]).slice(0, 12) });
+  const size = fs.statSync(file).size;
+  // The preview's estimate must be within 25% of the real size
+  const ratio = pv.estimate ? pv.estimate / size : null;
+  const estimateOk = ratio != null && Math.abs(ratio - 1) <= 0.25;
+  if (!estimateOk) report.failed = true;
+  report.runs.push({ name, opts, seconds: (Date.now() - t0) / 1000, file, size, ...pv, ratio: ratio && Number(ratio.toFixed(3)), estimateOk,
+    info: await page.textContent('#info'), warning: await page.isVisible('#size-warning'), progress: samples.filter((s, i, a) => s && s !== a[i - 1]).slice(0, 12) });
 }
 
 const browser = await (process.env.BROWSER === 'firefox' ? firefox : chromium).launch({ headless: !process.env.HEADED });
@@ -64,8 +82,17 @@ try {
           if (!ok) report.failed = true;
           continue;
         }
-        report.runs.push({ name, source });
+        // First preview, then two setting changes (each an update on the decoded samples)
+        const first = await previewDone(v.page);
+        const t1 = Date.now();
+        await v.page.fill('#width', '640');
+        const narrow = await previewDone(v.page);
+        const updateSeconds = (Date.now() - t1) / 1000;
+        await v.page.fill('#width', '960');
+        report.runs.push({ name, source, firstPreviewSeconds: first.previewSeconds, firstPreview: first.previewText,
+          updateSeconds, update640: narrow.previewText, update640Stills: narrow.stillSizes });
         await convert(v.page, name, {});
+        if (process.env.LOGDIR) fs.writeFileSync(path.join(process.env.LOGDIR, path.basename(f) + '.log'), logs.join('\n'));
       } catch (e) {
         report.runs.push({ name: 'variant ' + path.basename(f), failed: String(e.message || e).slice(0, 400) });
         if (process.env.LOGDIR) (await import('node:fs')).writeFileSync(path.join(process.env.LOGDIR, path.basename(f) + '.log'), logs.join('\n'));

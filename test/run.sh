@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Serves the page on localhost and runs e2e.mjs in the Playwright image, then checks the files with ffprobe.
 #   SBO_SAMPLE=<sdk/examples/video/sbo_sample.ogv> test/run.sh [port]
-# BROWSER=firefox uses Firefox, HEADED=1 a headed browser (in xvfb), ONLY_VARIANTS=1 only the real-world set.
+# BROWSER=firefox uses Firefox, HEADED=1 a headed browser (in xvfb), ONLY_VARIANTS=1 only the real-world set,
+# VARIANTS='/t/inputs/real/<file> ...' other files, PAGE_QUERY=?debug and LOGDIR=/t/out/logs for ffmpeg logs, TIMEOUT seconds for the browser run (default 2400).
+# Every conversion also checks that the preview's size estimate is within 25% of the real file, and the run reports
+# the browser's peak memory.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 PORT=${1:-8231}
@@ -44,18 +47,20 @@ gen phone_hevc_rot90_vfr.mp4 -display_rotation 90 "${SRC[@]}" -t 5 -vf "select=g
 gen vp8_vorbis_mediarecorder.webm "${SRC[@]}" -t 5 -c:v libvpx -deadline realtime -cpu-used 8 -b:v 2M -c:a libvorbis -f webm -live 1
 # Half of a file, which must fail with a message and leave the page working
 [ -f "$REAL/broken_truncated.mp4" ] || head -c 1000000 "$REAL/sample-5s.mp4" > "$REAL/broken_truncated.mp4"
-VARIANTS="/t/inputs/real/broken_truncated.mp4 /t/inputs/real/sample-5s.mp4 /t/inputs/real/le-liyQA-Wg-av1.webm \
+VARIANTS="${VARIANTS:-/t/inputs/real/broken_truncated.mp4 /t/inputs/real/sample-5s.mp4 /t/inputs/real/le-liyQA-Wg-av1.webm \
 /t/inputs/real/h264_4k30_aac.mp4 /t/inputs/real/vp9_opus_1080p30.webm /t/inputs/real/h264_1080p60_nosound.mp4 \
-/t/inputs/real/phone_hevc_rot90_vfr.mp4 /t/inputs/real/vp8_vorbis_mediarecorder.webm"
+/t/inputs/real/phone_hevc_rot90_vfr.mp4 /t/inputs/real/vp8_vorbis_mediarecorder.webm}"
 python3 -m http.server "$PORT" --bind 127.0.0.1 >test/out/server.log 2>&1 &
 SERVER=$!
 trap 'kill $SERVER' EXIT
 STATUS=0
+rm -f test/out/peak-mb.txt
 RUN=node; [ -n "${HEADED:-}" ] && RUN="xvfb-run -a node"
-timeout 2400 docker run --rm --memory=3g --memory-swap=3g --cpus=2 --network host -u "$(id -u):$(id -g)" -e HOME=/tmp \
-  -e BROWSER="${BROWSER:-}" -e HEADED="${HEADED:-}" -e ONLY_VARIANTS="${ONLY_VARIANTS:-}" \
+timeout "${TIMEOUT:-2400}" docker run --rm --memory=3g --memory-swap=3g --cpus=2 --network host -u "$(id -u):$(id -g)" -e HOME=/tmp \
+  -e BROWSER="${BROWSER:-}" -e HEADED="${HEADED:-}" -e ONLY_VARIANTS="${ONLY_VARIANTS:-}" -e LOGDIR="${LOGDIR:-}" \
   -v "$PWD/test:/t" -w /tmp "$PW" sh -c "npm i --silent --no-audit --no-fund playwright@1.48.2 >/dev/null && cp /t/e2e.mjs . && \
-  $RUN e2e.mjs http://127.0.0.1:$PORT/ '/t/inputs/Sample Clip 10s.mp4' /t/out /t/inputs/noisy_10s.mp4 $VARIANTS" | tee test/out/report.json || STATUS=1
+  (sh /t/peak-mem.sh /t/out/peak-mb.txt &) && $RUN e2e.mjs 'http://127.0.0.1:$PORT/${PAGE_QUERY:-}' '/t/inputs/Sample Clip 10s.mp4' /t/out /t/inputs/noisy_10s.mp4 $VARIANTS" | tee test/out/report.json || STATUS=1
+echo "Browser peak memory (PSS): $(cat test/out/peak-mb.txt 2>/dev/null) MB"
 for f in test/out/*--*.og?; do
   echo "== $f"
   timeout 60 docker run --rm --memory=1g --cpus=1 --entrypoint ffprobe -v "$PWD/$f:/f:ro" "$FFMPEG" -v error \
