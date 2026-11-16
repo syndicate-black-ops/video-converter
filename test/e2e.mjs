@@ -26,9 +26,68 @@ async function choose(page, f = input) {
   return page.textContent('#source');
 }
 
+// Samples the preview's progress bar until the preview ends: the values must only go up and reach the end;
+// takes one screenshot mid-way when asked
+async function watchProgress(page, shot) {
+  const values = [];
+  let shotTaken = false;
+  for (let i = 0; i < 4800; i++) {
+    const state = await page.getAttribute('#preview', 'data-state');
+    const visible = await page.isVisible('#preview-progress-box');
+    if (visible) {
+      const v = Number(await page.getAttribute('#preview-progress', 'value'));
+      if (values[values.length - 1] !== v) values.push(v);
+      if (shot && !shotTaken && v >= 0.3 && v <= 0.8) {
+        await page.screenshot({ path: shot, fullPage: true });
+        shotTaken = true;
+      }
+    }
+    if (state === 'done' || state === 'error' || state === 'invalid' || state === 'none' || state === 'slow') break;
+    await page.waitForTimeout(250);
+  }
+  const rising = values.every((v, i) => i === 0 || v >= values[i - 1]);
+  return { steps: values.length, first: values[0], last: values[values.length - 1], rising, shot: shotTaken ? shot : null };
+}
+
+// The bar hides as soon as the preview ends, so the last value seen is near the end rather than exactly 100%
+function progressOk(p) {
+  return p.rising && p.steps >= 5 && p.last >= 0.8;
+}
+
+// Opens the first still in the lightbox, steps with the arrow key, closes with Esc; on a phone-sized page with
+// taps on the buttons
+async function checkLightbox(page, shot, touch) {
+  await (touch ? page.tap('.still >> nth=0') : page.click('.still >> nth=0'));
+  await page.waitForSelector('#lightbox:not([hidden])', { timeout: 10000 });
+  await page.waitForSelector('#lb-img[data-size]', { state: 'attached', timeout: 10000 });
+  const size = await page.getAttribute('#lb-img', 'data-size');
+  const box = await page.locator('#lb-img').boundingBox();
+  const cap1 = await page.textContent('#lb-cap');
+  if (shot) await page.screenshot({ path: shot });
+  if (touch) await page.tap('#lb-next'); else await page.keyboard.press('ArrowRight');
+  await page.waitForTimeout(300);
+  const cap2 = await page.textContent('#lb-cap');
+  if (touch) await page.tap('#lb-close'); else await page.keyboard.press('Escape');
+  await page.waitForTimeout(200);
+  const closed = await page.isHidden('#lightbox');
+  const [w, h] = (size || '0x0').split('x').map(Number);
+  // Shown at its real size, or smaller to fit the window, never bigger
+  const ok = closed && cap1 !== cap2 && box && box.width <= w + 1 && box.height <= h + 1;
+  return { size, shown: box && Math.round(box.width) + 'x' + Math.round(box.height), cap1, cap2, closed, ok };
+}
+
+// In the slow mode the preview runs on the Preview button: returns the bitrate estimate shown before, then runs it
+async function runIfSlow(page) {
+  if (await page.getAttribute('#preview', 'data-state') !== 'slow') return null;
+  const before = await page.getAttribute('#estimate', 'data-bytes');
+  await page.click('#preview-run');
+  await page.waitForSelector('#preview:not([data-state="slow"])', { state: 'attached', timeout: 10000 });
+  return { bitrateEstimate: before ? Number(before) : null, firstDecode: Number(await page.getAttribute('#preview', 'data-first-decode')) || null };
+}
+
 // Waits for the preview of the current settings; returns its time and size estimate
 async function previewDone(page) {
-  await page.waitForSelector('#preview[data-state="done"], #preview[data-state="invalid"], #preview[data-state="error"], #preview[data-state="none"]',
+  await page.waitForSelector('#preview[data-state="done"], #preview[data-state="invalid"], #preview[data-state="error"], #preview[data-state="none"], #preview[data-state="slow"]',
     { state: 'attached', timeout: 1200000 });
   const est = await page.getAttribute('#estimate', 'data-bytes');
   return { estimate: est ? Number(est) : null, previewSeconds: Number(await page.getAttribute('#preview', 'data-seconds')) || null,
@@ -40,7 +99,9 @@ async function convert(page, name, opts) {
   for (const [id, v] of Object.entries(opts)) {
     if (id === 'mode') await page.selectOption('#mode', v); else await page.fill('#' + id, String(v));
   }
-  const pv = await previewDone(page);
+  let pv = await previewDone(page);
+  const slow = await runIfSlow(page);
+  if (slow) pv = { ...(await previewDone(page)), slow };
   const t0 = Date.now();
   const samples = [];
   await page.click('#convert');
@@ -57,12 +118,13 @@ async function convert(page, name, opts) {
   const ratio = pv.estimate ? pv.estimate / size : null;
   const estimateOk = ratio != null && Math.abs(ratio - 1) <= 0.25;
   if (!estimateOk) report.failed = true;
-  report.runs.push({ name, opts, seconds: (Date.now() - t0) / 1000, file, size, ...pv, ratio: ratio && Number(ratio.toFixed(3)), estimateOk,
+  report.runs.push({ name, opts, convertStart: t0, convertEnd: Date.now(), seconds: (Date.now() - t0) / 1000, file, size, ...pv, ratio: ratio && Number(ratio.toFixed(3)), estimateOk,
     info: await page.textContent('#info'), warning: await page.isVisible('#size-warning'), progress: samples.filter((s, i, a) => s && s !== a[i - 1]).slice(0, 12) });
 }
 
-const browser = await (process.env.BROWSER === 'firefox' ? firefox : chromium).launch({ headless: !process.env.HEADED });
-report.browser = (process.env.BROWSER || 'chromium') + (process.env.HEADED ? ' headed' : ' headless') + ' ' + browser.version();
+const browser = await (process.env.TEST_BROWSER === 'firefox' ? firefox : chromium).launch({ headless: !process.env.HEADED });
+const browserName = process.env.TEST_BROWSER || 'chromium';
+report.browser = browserName + (process.env.HEADED ? ' headed' : ' headless') + ' ' + browser.version();
 try {
   // Extra inputs (WebM kinds): defaults, each must convert
   if (variants.length) {
@@ -83,14 +145,32 @@ try {
           continue;
         }
         // First preview, then two setting changes (each an update on the decoded samples)
+        const isSample = /sample-5s/.test(f);
+        let progress = await watchProgress(v.page, isSample ? path.join(out, 'page-progress-' + browserName + '.png') : null);
+        if (isSample && await v.page.getAttribute('#preview', 'data-state') === 'slow') {
+          await v.page.screenshot({ path: path.join(out, 'page-slow-' + browserName + '.png'), fullPage: true });
+        }
+        const slow = await runIfSlow(v.page);
+        if (slow) {
+          progress = { speedCheck: progress, ...(await watchProgress(v.page, isSample ? path.join(out, 'page-progress-' + browserName + '.png') : null)) };
+        }
+        if (!progressOk(progress)) report.failed = true;
         const first = await previewDone(v.page);
+        const firstDecode = Number(await v.page.getAttribute('#preview', 'data-first-decode')) || null;
+        const lightbox = isSample ? await checkLightbox(v.page, path.join(out, 'page-lightbox-' + browserName + '.png'), false) : null;
+        if (lightbox && !lightbox.ok) report.failed = true;
         const t1 = Date.now();
         await v.page.fill('#width', '640');
+        await v.page.waitForTimeout(800);
+        const slowUpdate = await runIfSlow(v.page);
+        const updateProgress = await watchProgress(v.page, null);
+        if (!progressOk(updateProgress)) report.failed = true;
         const narrow = await previewDone(v.page);
         const updateSeconds = (Date.now() - t1) / 1000;
         await v.page.fill('#width', '960');
         report.runs.push({ name, source, firstPreviewSeconds: first.previewSeconds, firstPreview: first.previewText,
-          updateSeconds, update640: narrow.previewText, update640Stills: narrow.stillSizes });
+          updateSeconds, update640: narrow.previewText, update640Stills: narrow.stillSizes, progress, updateProgress, lightbox,
+          slow: !!slow, firstDecode, bitrateEstimate: slow && slow.bitrateEstimate, slowUpdate: !!slowUpdate });
         await convert(v.page, name, {});
         if (process.env.LOGDIR) fs.writeFileSync(path.join(process.env.LOGDIR, path.basename(f) + '.log'), logs.join('\n'));
       } catch (e) {
@@ -100,6 +180,21 @@ try {
       }
     }
     await v.ctx.close();
+    const phoneFile = variants.find((f) => /sample-5s/.test(f));
+    if (phoneFile) {
+      const touch = browserName === 'chromium';
+      const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, ...(touch ? { hasTouch: true, isMobile: true } : {}) });
+      const page = await ctx.newPage();
+      page.on('pageerror', (e) => report.errors.push(String(e)));
+      await page.goto(url);
+      await choose(page, phoneFile);
+      await previewDone(page);
+      if (await runIfSlow(page)) await previewDone(page);
+      const lb = await checkLightbox(page, path.join(out, 'page-lightbox-phone-' + browserName + '.png'), touch);
+      report.runs.push({ name: 'phone-sized lightbox' + (touch ? ' (touch)' : ''), lightbox: lb });
+      if (!lb.ok) report.failed = true;
+      await ctx.close();
+    }
     // A real failed run (AV1, let through by ?debug=av1), then a normal video in the same tab
     const av1 = variants.find((f) => /av1/.test(f)), ok = variants.find((f) => /sample-5s/.test(f));
     if (av1 && ok) {

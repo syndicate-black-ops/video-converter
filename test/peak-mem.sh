@@ -1,5 +1,6 @@
 #!/bin/sh
-# Writes the highest total memory (PSS, so shared pages count once) of the browser's processes to $1, every 0.5 s.
+# Writes the highest total memory (PSS, so shared pages count once) of the browser's processes to $1, every 0.5 s,
+# and each sample as "<unix ms> <MB>" to $2 when given.
 peak=0
 while :; do
   total=0
@@ -11,5 +12,6 @@ while :; do
     esac
   done
   [ "$total" -gt "$peak" ] && peak=$total && echo $((peak / 1024)) > "$1"
+  [ -n "$2" ] && echo "$(date +%s%3N) $((total / 1024))" >> "$2"
   sleep 0.5
 done
