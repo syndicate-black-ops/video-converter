@@ -1,0 +1,11 @@
+ffmpeg-core.js and ffmpeg-core.wasm are @ffmpeg/core 0.12.10 from npm, unchanged.
+
+They are FFmpeg n5.1.4 built with x264, x265, libvpx, LAME, libogg, libtheora, libopus,
+libvorbis, zlib, libwebp, FreeType, FriBidi, HarfBuzz, libass and zimg, and FFmpeg is
+configured with --enable-gpl, so the files are under the GNU General Public License,
+version 2 or later (COPYING).
+
+Source: the build scripts at
+https://github.com/ffmpegwasm/ffmpeg.wasm/tree/71aa99d37c02a7b4c435275ca9ef50e612f6efa1
+(Dockerfile lists each library and its version) and FFmpeg n5.1.4 at
+https://github.com/FFmpeg/FFmpeg/tree/n5.1.4
