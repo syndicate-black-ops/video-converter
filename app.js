@@ -52,6 +52,7 @@ let stillURLs = [];
 let stills = [];        // {url, start} of the shown stills, for the lightbox
 let lightboxIndex = 0;
 let lightboxReturn = null;
+let lightboxScroll = 0;
 let sampleProgress = []; // per sample, 0..1
 let shownProgress = 0;
 // Preview samples at the start, a third and two thirds into the video; 0.8 s is the shortest that keeps the size
@@ -589,6 +590,10 @@ function openLightbox(index, from) {
   lightboxReturn = from || null;
   showLightbox(index);
   lightbox.hidden = false;
+  // The page behind stays where it is and can't scroll (position: fixed also stops it on phones)
+  lightboxScroll = window.scrollY;
+  document.body.style.top = -lightboxScroll + 'px';
+  document.documentElement.classList.add('lightbox-open');
   document.body.classList.add('lightbox-open');
   lbClose.focus();
 }
@@ -596,7 +601,10 @@ function openLightbox(index, from) {
 function closeLightbox() {
   if (lightbox.hidden) return;
   lightbox.hidden = true;
+  document.documentElement.classList.remove('lightbox-open');
   document.body.classList.remove('lightbox-open');
+  document.body.style.top = '';
+  window.scrollTo(0, lightboxScroll);
   if (lightboxReturn) lightboxReturn.focus();
 }
 
