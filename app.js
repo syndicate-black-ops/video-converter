@@ -14,6 +14,12 @@ const SERVER_SEND_BYTES = 10 * 1024 * 1024;
 const VORBIS_KBPS = [64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 500];
 // Share of the work in pass 1 (measure only) and pass 2 (writes the file)
 const PASS1_SHARE = 0.4;
+// ?debug in the address writes ffmpeg's log to the browser console; ?debug=av1 also lets an AV1 video run (and fail),
+// which the test uses to check that the page recovers from a failed run
+const DEBUG = new URLSearchParams(location.search).has('debug');
+const TRY_AV1 = new URLSearchParams(location.search).get('debug') === 'av1';
+// The ffmpeg.wasm core has no AV1 decoder (FFmpeg's own one needs graphics hardware)
+const AV1_TEXT = 'This video uses AV1, which this page can\'t read. Download it as MP4 (H.264) instead, or convert it with the ffmpeg command on the Video page';
 
 const $ = (id) => document.getElementById(id);
 const drop = $('drop'), picker = $('file'), sourceText = $('source');
@@ -69,6 +75,7 @@ async function loadFFmpeg() {
   setStatus('Loading the converter (32 MB, only the first time)...');
   const f = new FFmpeg();
   f.on('log', ({ message }) => {
+    if (DEBUG) console.log(message);
     logLines.push(message);
     if (logLines.length > 400) logLines.splice(0, 200);
     const t = /time=\s*(\d+):(\d+):([\d.]+)/.exec(message);
@@ -91,7 +98,7 @@ async function mountFile(f) {
 // Reads the duration, picture size, frame rate and sound of a file from ffmpeg's "-i" output
 function readInfo(lines) {
   const text = lines.join('\n');
-  const out = { duration: null, width: 0, height: 0, fps: 0, audio: false, video: false };
+  const out = { duration: null, width: 0, height: 0, fps: 0, audio: false, video: false, codec: '' };
   const d = /Duration:\s*(\d+):(\d+):([\d.]+)/.exec(text);
   if (d) out.duration = parseTime(d[1], d[2], d[3]);
   for (const line of lines) {
@@ -100,7 +107,8 @@ function readInfo(lines) {
     if (/: Video:/.test(line) && !/attached pic/.test(line) && !out.video) {
       const s = /, (\d{2,5})x(\d{2,5})/.exec(line);
       const r = /([\d.]+) fps/.exec(line) || /([\d.]+) tbr/.exec(line);
-      if (s) { out.video = true; out.width = Number(s[1]); out.height = Number(s[2]); }
+      const c = /: Video: (\w+)/.exec(line);
+      if (s) { out.video = true; out.width = Number(s[1]); out.height = Number(s[2]); out.codec = c ? c[1] : ''; }
       if (r) out.fps = Number(r[1]);
     }
   }
@@ -145,6 +153,7 @@ function settings() {
     return s;
   }
   if (!probe.video) throw new Error('This file has no video. Choose "Sound only" to make an .ogg');
+  if (probe.codec === 'av1' && !TRY_AV1) throw new Error(AV1_TEXT);
   s.width = intIn(widthIn, 16, MAX_SIZE, 'Width');
   if (s.width % 2) throw new Error('Width must be an even number');
   s.height = outHeight(s.width);
@@ -202,11 +211,13 @@ async function choose(f) {
     showMode();
     convertBtn.disabled = false;
     let note = '';
-    if (probe.duration > 60) note = 'Long videos take a while: a minute of 1080p at 60 fps takes about 12 minutes. A smaller width or 30 fps is faster.';
-    setStatus(note);
+    if (probe.codec === 'av1') note = AV1_TEXT;
+    if (probe.duration > 60) note = 'Long videos take a while: a minute of 1080p at 60 fps takes about 12 minutes. A smaller width or 30 fps is faster, and so is Chrome or Edge.';
+    setStatus(note, probe.codec === 'av1' ? 'error' : '');
   } catch (e) {
     probe = null;
     setStatus('Could not read ' + f.name + ': ' + e.message, 'error');
+    if (ffmpeg) { ffmpeg.terminate(); ffmpeg = null; }
   }
 }
 
@@ -259,7 +270,7 @@ async function convert() {
       try { await ff.deleteFile(p); } catch (e) { /* not there */ }
     }
     const ext = s.mode === 'audio' ? '.ogg' : '.ogv';
-    output = { blob: new Blob([data], { type: s.mode === 'audio' ? 'audio/ogg' : 'video/ogg' }), name: gameName(file.name, ext) };
+    output = { blob: new Blob([data], { type: 'application/octet-stream' }), name: gameName(file.name, ext) };
     const took = (performance.now() - started) / 1000;
     info.textContent = [
       'File:     ' + output.name,
@@ -280,6 +291,8 @@ async function convert() {
     setBusy(false);
     if (canceled) return;
     setStatus('The conversion failed: ' + e.message, 'error');
+    // A failed run can leave the ffmpeg instance unusable, so the next run starts a new one
+    if (ffmpeg) { ffmpeg.terminate(); ffmpeg = null; }
   }
 }
 
