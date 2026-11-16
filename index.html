@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self' blob: data:; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Syndicate Black Ops video converter</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <h1>Syndicate Black Ops video converter</h1>
+  <p class="lead">Turn a video into an <code>.ogv</code> file that plays in the game, or its sound into an <code>.ogg</code>. Your video never leaves your computer, because the conversion runs in your browser. The <a id="docs" href="https://syndicate-black-ops.github.io/docs/mapping/features/video#making-a-video-file">Video page</a> explains the format, its limits and how to use the file in a map.</p>
+
+  <div id="drop" class="drop" tabindex="0" role="button" aria-label="Choose a video">
+    <strong>Drop a video here</strong>
+    <span>or click to choose a file</span>
+    <span id="source" class="source"></span>
+  </div>
+  <input id="file" type="file" accept="video/*,audio/*,.mkv,.ogv,.ogg" hidden>
+
+  <div class="options">
+    <label>Make
+      <select id="mode">
+        <option value="video" selected>Video (.ogv)</option>
+        <option value="audio">Sound only (.ogg)</option>
+      </select>
+    </label>
+    <label class="video-only">Width
+      <input id="width" type="number" min="16" max="2048" step="2" value="960">
+    </label>
+    <label class="video-only">Frame rate
+      <input id="fps" type="number" min="1" max="240" step="1" placeholder="Same">
+    </label>
+    <label class="video-only">Bitrate (kbit/s)
+      <input id="bitrate" type="number" min="100" max="20000" step="50" value="1100">
+    </label>
+    <label>Sound quality
+      <input id="quality" type="number" min="0" max="10" step="1" value="3">
+    </label>
+  </div>
+  <ul class="hints">
+    <li class="video-only"><strong>Width</strong> in pixels, up to 2048, and the height follows the shape of the video</li>
+    <li class="video-only"><strong>Frame rate</strong> stays the same if you leave it empty, and 30 halves the work for a 60 fps video</li>
+    <li class="video-only"><strong>Bitrate</strong> sets the file size: 1100 makes about 8.5 MB per minute, 600 about 4.7 MB</li>
+    <li><strong>Sound quality</strong> goes from 0 to 10, and 3 is about 112 kbit/s</li>
+  </ul>
+
+  <div class="actions">
+    <button id="convert" class="button" type="button" disabled>Convert</button>
+    <button id="cancel" class="button secondary" type="button" hidden>Cancel</button>
+  </div>
+
+  <div id="progress-box" hidden>
+    <progress id="progress" max="1" value="0"></progress>
+    <p id="progress-text" class="hint"></p>
+  </div>
+  <p id="status" role="status"></p>
+
+  <section id="result" hidden>
+    <pre id="info"></pre>
+    <p id="size-warning" class="warning" hidden>This file is over 10 MB. A server sends files up to 10 MB itself, so players get a bigger file only if the server has a download address (<code>sv_downloadurl</code>). A lower bitrate makes the file smaller.</p>
+    <button id="save" class="button" type="button">Save</button>
+  </section>
+
+  <footer>
+    Made with <a href="https://ffmpegwasm.netlify.app/">ffmpeg.wasm</a> (MIT) and <a href="https://ffmpeg.org/">FFmpeg</a> (GPL 2.0 or later). <a href="https://github.com/syndicate-black-ops/video-converter#license">Licenses and source</a>
+  </footer>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>
