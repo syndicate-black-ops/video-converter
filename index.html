@@ -48,6 +48,14 @@
   </ul>
 
   <section id="preview" data-state="none" hidden>
+    <div id="preview-slow" hidden>
+      <button id="preview-run" class="button secondary" type="button">Preview</button>
+      <span class="hint">Slow in this browser</span>
+    </div>
+    <div id="preview-progress-box" hidden>
+      <progress id="preview-progress" max="1" value="0"></progress>
+      <span id="preview-progress-text" class="hint"></span>
+    </div>
     <div id="stills" class="stills"></div>
     <p id="estimate"></p>
     <p id="estimate-warning" class="warning" hidden></p>
@@ -74,6 +82,17 @@
     Made with <a href="https://ffmpegwasm.netlify.app/">ffmpeg.wasm</a> (MIT) and <a href="https://ffmpeg.org/">FFmpeg</a> (GPL 2.0 or later). <a href="https://github.com/syndicate-black-ops/video-converter#license">Licenses and source</a>
   </footer>
 </main>
+<div id="lightbox" class="lightbox" role="dialog" aria-modal="true" aria-label="Preview at full size" hidden>
+  <button id="lb-close" class="lb-btn lb-close" type="button" aria-label="Close">&times;</button>
+  <button id="lb-prev" class="lb-btn lb-prev" type="button" aria-label="Previous still">&lsaquo;</button>
+  <div class="lb-stage">
+    <figure class="lb-figure">
+      <img id="lb-img" alt="">
+      <figcaption id="lb-cap"></figcaption>
+    </figure>
+  </div>
+  <button id="lb-next" class="lb-btn lb-next" type="button" aria-label="Next still">&rsaquo;</button>
+</div>
 <script type="module" src="app.js"></script>
 </body>
 </html>

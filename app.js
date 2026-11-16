@@ -29,6 +29,9 @@ const convertBtn = $('convert'), cancelBtn = $('cancel');
 const progressBox = $('progress-box'), progressBar = $('progress'), progressText = $('progress-text');
 const status = $('status'), result = $('result'), info = $('info'), sizeWarning = $('size-warning'), saveBtn = $('save');
 const previewBox = $('preview'), stillsBox = $('stills'), estimateText = $('estimate'), estimateWarning = $('estimate-warning');
+const previewSlow = $('preview-slow'), previewRun = $('preview-run');
+const previewProgressBox = $('preview-progress-box'), previewProgress = $('preview-progress'), previewProgressText = $('preview-progress-text');
+const lightbox = $('lightbox'), lbImg = $('lb-img'), lbCap = $('lb-cap'), lbPrev = $('lb-prev'), lbNext = $('lb-next'), lbClose = $('lb-close');
 
 let ffmpeg = null;      // loaded FFmpeg, or null
 let file = null;        // the chosen File
@@ -38,18 +41,29 @@ let busy = false;
 let canceled = false;
 let logLines = [];
 let onTime = null;      // progress callback while a pass runs
-const previewWorkers = []; // {ff, file, sample} per preview sample
+const previewWorkers = []; // {ff, file, samples} per preview sample (only the first in the slow mode)
 let previewToken = 0;   // a newer preview makes older ones stop
 let previewRunning = false;
 let previewAgain = false; // settings changed while a preview ran
+let speedFile = null;   // the file whose preview speed was measured
+let slowFile = null;    // the file whose preview runs only on request, one sample at a time
 let previewTimer = null;
 let stillURLs = [];
+let stills = [];        // {url, start} of the shown stills, for the lightbox
+let lightboxIndex = 0;
+let lightboxReturn = null;
+let sampleProgress = []; // per sample, 0..1
+let shownProgress = 0;
 // Preview samples at the start, a third and two thirds into the video; 0.8 s is the shortest that keeps the size
 // estimate within 25% on hard-to-encode videos (Theora's rate control needs that long to settle)
 const SAMPLE_SECONDS = 0.8;
 const SAMPLE_POINTS = [0, 1 / 3, 2 / 3];
 const AUDIO_SAMPLE_SECONDS = 5;
 const PREVIEW_DELAY_MS = 600;
+// A preview that would take longer than this (slow browser or computer) runs only when asked; the time is projected
+// from the first sample's decoding, which takes about an eighth of a whole preview
+const PREVIEW_MAX_SECONDS = 40;
+const DECODE_TO_PREVIEW = 8;
 // A decoded sample is kept uncompressed (fast to read again, and lossless codecs need far more memory at 4K); its
 // length is cut so that it stays under this size
 const RAW_SAMPLE_BYTES = 160 * 1024 * 1024;
@@ -250,8 +264,12 @@ function samplePoints(duration, length) {
 }
 
 function clearPreview(state) {
+  closeLightbox();
   for (const u of stillURLs) URL.revokeObjectURL(u);
   stillURLs = [];
+  stills = [];
+  previewProgressBox.hidden = true;
+  previewSlow.hidden = true;
   stillsBox.replaceChildren();
   estimateText.textContent = '';
   estimateWarning.hidden = true;
@@ -277,6 +295,10 @@ function stopPreview() {
 function schedulePreview(delay = PREVIEW_DELAY_MS) {
   if (!probe || busy) return;
   clearTimeout(previewTimer);
+  if (slowFile === file) {
+    showSlow();
+    return;
+  }
   previewBox.dataset.state = 'pending';
   previewTimer = setTimeout(() => {
     if (previewRunning) previewAgain = true; else runPreview();
@@ -292,19 +314,60 @@ async function previewWorker(i) {
   let w = previewWorkers[i];
   if (!w) {
     const ff = new FFmpeg();
-    if (DEBUG) ff.on('log', ({ message }) => console.log('[preview ' + i + '] ' + message));
+    const nw = { ff, file: null, samples: {}, onTime: null };
+    ff.on('log', ({ message }) => {
+      if (DEBUG) console.log('[preview ' + i + '] ' + message);
+      const t = /time=\s*(\d+):(\d+):([\d.]+)/.exec(message);
+      if (t && nw.onTime) nw.onTime(parseTime(t[1], t[2], t[3]));
+    });
     await ff.load({ coreURL: CORE_URL, wasmURL: WASM_URL });
     await ff.createDir('/in');
     await ff.createDir('/work');
-    w = previewWorkers[i] = { ff, file: null, sample: null };
+    w = previewWorkers[i] = nw;
   }
   if (w.file !== file) {
     try { await w.ff.unmount('/in'); } catch (e) { /* nothing mounted yet */ }
     await w.ff.mount('WORKERFS', { files: [file] }, '/in');
     w.file = file;
-    w.sample = null;
+    w.samples = {};
+    // The decoded samples of the last file
+    for (let i = 0; i < SAMPLE_POINTS.length; i++) {
+      try { await w.ff.deleteFile('/work/s' + i + '.nut'); } catch (e) { /* not there */ }
+    }
   }
   return w;
+}
+
+// Progress of the preview: each sample's stages (start ffmpeg, decode, the encoding passes, the still) by weight,
+// and inside a stage ffmpeg's time against the sample's length; the bar shows the samples' average and never goes back
+function resetPreviewProgress(count) {
+  sampleProgress = new Array(count).fill(0);
+  shownProgress = 0;
+  previewProgress.value = 0;
+  previewProgressText.textContent = 'Preview 0%';
+  previewProgressBox.hidden = false;
+}
+
+function setSampleProgress(i, fraction) {
+  sampleProgress[i] = Math.max(sampleProgress[i] || 0, Math.min(1, fraction));
+  const total = sampleProgress.reduce((a, b) => a + b, 0) / sampleProgress.length;
+  if (total <= shownProgress) return;
+  shownProgress = total;
+  previewProgress.value = total;
+  previewProgressText.textContent = 'Preview ' + Math.floor(total * 100) + '%';
+}
+
+// Runs the stages [{weight, run(onTime)}] of sample i and reports progress as they go; `later` is the weight of
+// stages that run afterwards in another call
+async function runStages(i, stages, length, later = 0) {
+  const sum = stages.reduce((a, st) => a + st.weight, 0) + later;
+  let done = 0;
+  for (const st of stages) {
+    const base = done;
+    await st.run((t) => setSampleProgress(i, (base + st.weight * Math.min(1, t / length)) / sum));
+    done += st.weight;
+    setSampleProgress(i, done / sum);
+  }
 }
 
 async function exec(w, args) {
@@ -316,38 +379,99 @@ async function exec(w, args) {
 
 // Encodes one sample with the settings; the source is decoded once into an uncompressed (or lossless) file at its
 // own size, and every later setting only runs the filter and the encoder on it
-async function previewSample(i, s, start, length, token) {
-  const w = await previewWorker(i);
+// `decodeOnly` stops after decoding (the speed check); `decodedBefore` counts that part as done in the progress
+async function previewSample(i, s, start, length, token, decodeOnly = false, decodedBefore = false) {
   const key = start.toFixed(3) + '+' + length.toFixed(3);
-  if (w.sample !== key) {
-    const decode = () => exec(w, ['-y', '-ss', start.toFixed(3), '-t', length.toFixed(3), '-i', '/in/' + file.name,
-      '-c:v', 'rawvideo', '-c:a', 'pcm_f32le', '-f', 'nut', '/work/sample.nut']);
-    if (frameBytes() > BIG_FRAME_BYTES) {
-      const turn = decodeQueue.then(decode);
-      decodeQueue = turn.catch(() => {});
-      await turn;
-    } else {
-      await decode();
-    }
-    w.sample = key;
+  // Samples run side by side in their own ffmpeg, or all in the first one in the slow mode (less memory)
+  const wi = slowFile === file ? 0 : i;
+  const base = '/work/s' + i;
+  const out = base + (s.mode === 'audio' ? '-out.ogg' : '-out.ogv');
+  let w = previewWorkers[wi];
+  const stages = [];
+  const withTime = (fn) => async (onTime) => { w.onTime = onTime; try { await fn(); } finally { w.onTime = null; } };
+  const encodeWeight = 3 * (s.mode === 'audio' ? 1 : 2) + (s.mode === 'video' ? 0.3 : 0);
+  if (decodedBefore) stages.push({ weight: 5, run: async () => { w = await previewWorker(wi); } });
+  else if (!w) stages.push({ weight: 1, run: async () => { w = await previewWorker(wi); } });
+  else stages.push({ weight: 0, run: async () => { w = await previewWorker(wi); } });
+  // Decoding the source happens once per file and sample, so it only counts when it runs
+  const decodes = !w || w.file !== file || w.samples[i] !== key;
+  if (decodes) {
+    stages.push({ weight: 4, run: withTime(async () => {
+      if (w.samples[i] === key) return;
+      const t0 = performance.now();
+      const decode = () => exec(w, ['-y', '-ss', start.toFixed(3), '-t', length.toFixed(3), '-i', '/in/' + file.name,
+        '-c:v', 'rawvideo', '-c:a', 'pcm_f32le', '-f', 'nut', base + '.nut']);
+      if (frameBytes() > BIG_FRAME_BYTES) {
+        const turn = decodeQueue.then(decode);
+        decodeQueue = turn.catch(() => {});
+        await turn;
+      } else {
+        await decode();
+      }
+      w.samples[i] = key;
+      w.decodeSeconds = (performance.now() - t0) / 1000;
+    }) });
   }
-  if (token !== previewToken) return null;
-  for (const run of commands(s, '/work/sample.nut', '/work/out', [], '/work/pass')) {
-    await exec(w, run);
-    if (token !== previewToken) return null;
+  if (decodeOnly) {
+    await runStages(i, stages, length, encodeWeight);
+    return { decodeSeconds: w.decodeSeconds || 0 };
   }
-  const out = s.mode === 'audio' ? '/work/out.ogg' : '/work/out.ogv';
-  const bytes = await w.ff.readFile(out);
+  for (const run of commands(s, base + '.nut', base + '-out', [], base + '-pass')) {
+    stages.push({ weight: 3, run: withTime(async () => {
+      if (token !== previewToken) return;
+      await exec(w, run);
+    }) });
+  }
   let png = null;
   if (s.mode === 'video') {
-    await exec(w, ['-y', '-ss', (length / 2).toFixed(3), '-i', out, '-frames:v', '1', '/work/still.png']);
-    png = await w.ff.readFile('/work/still.png');
+    stages.push({ weight: 0.3, run: async () => {
+      if (token !== previewToken) return;
+      await exec(w, ['-y', '-ss', (length / 2).toFixed(3), '-i', out, '-frames:v', '1', base + '-still.png']);
+      png = await w.ff.readFile(base + '-still.png');
+    } });
   }
+  await runStages(i, stages, length);
+  if (token !== previewToken) return null;
+  const bytes = await w.ff.readFile(out);
   return { start, length, bytes, png };
 }
 
-async function runPreview() {
+// In the slow mode the preview waits for the Preview button; the estimate comes from the bitrate until then
+function showSlow() {
+  let s;
+  try {
+    s = settings();
+  } catch (e) {
+    clearPreview('invalid');
+    return;
+  }
+  previewBox.hidden = false;
+  previewBox.dataset.state = 'slow';
+  previewSlow.hidden = false;
+  showEstimate(s, s.estimate);
+}
+
+function showEstimate(s, estimate) {
+  const picture = s.mode === 'video' ? ', ' + s.width + ' x ' + s.height + (s.fps ? ' at ' + s.fps + ' fps' : '') : '';
+  estimateText.textContent = (estimate ? 'About ' + mb(estimate) : 'Unknown size') + picture;
+  if (estimate) estimateText.dataset.bytes = String(Math.round(estimate)); else delete estimateText.dataset.bytes;
+  estimateWarning.hidden = true;
+  if (estimate > MAX_BYTES) {
+    estimateWarning.textContent = 'This is over the 128 MB the game plays. A lower bitrate makes the file smaller.';
+    estimateWarning.hidden = false;
+  } else if (estimate > SERVER_SEND_BYTES) {
+    estimateWarning.textContent = sizeWarning.textContent;
+    estimateWarning.hidden = false;
+  }
+}
+
+async function runPreview(asked = false) {
   if (!probe || busy) return;
+  if (slowFile === file && !asked) {
+    showSlow();
+    return;
+  }
+  previewSlow.hidden = true;
   let s;
   try {
     s = settings();
@@ -361,14 +485,42 @@ async function runPreview() {
   const started = performance.now();
   previewBox.hidden = false;
   previewBox.dataset.state = 'running';
-  if (!stillsBox.children.length) estimateText.textContent = 'Preview...';
+  if (!stillsBox.children.length) estimateText.textContent = '';
   try {
     const points = samplePoints(probe.duration, sampleSeconds(s));
-    const samples = await Promise.all(points.map(([start, length], i) => previewSample(i, s, start, length, token)));
+    resetPreviewProgress(points.length);
+    let checked = false;
+    if (speedFile !== file) {
+      // Decode the first sample alone and project the whole preview from it
+      const first = await previewSample(0, s, points[0][0], points[0][1], token, true);
+      if (token !== previewToken || !first) return;
+      speedFile = file;
+      checked = true;
+      previewBox.dataset.firstDecode = first.decodeSeconds.toFixed(1);
+      if (first.decodeSeconds * DECODE_TO_PREVIEW > PREVIEW_MAX_SECONDS) {
+        slowFile = file;
+        for (const w of previewWorkers.splice(1)) if (w) w.ff.terminate();
+        previewProgressBox.hidden = true;
+        showSlow();
+        return;
+      }
+    }
+    let samples;
+    if (slowFile === file) {
+      // One sample at a time, which keeps the memory low on the browsers that are slow anyway
+      samples = [];
+      for (let i = 0; i < points.length; i++) {
+        samples.push(await previewSample(i, s, points[i][0], points[i][1], token, false, i === 0 && checked));
+        if (token !== previewToken) return;
+      }
+    } else {
+      samples = await Promise.all(points.map(([start, length], i) => previewSample(i, s, start, length, token, false, i === 0 && checked)));
+    }
     if (token !== previewToken || samples.includes(null)) return;
     let data = 0, seconds = 0, header = 0;
     for (const u of stillURLs) URL.revokeObjectURL(u);
     stillURLs = [];
+    stills = [];
     stillsBox.replaceChildren();
     for (const sm of samples) {
       const h = oggHeaderBytes(sm.bytes);
@@ -378,31 +530,29 @@ async function runPreview() {
       if (!sm.png) continue;
       const url = URL.createObjectURL(new Blob([sm.png], { type: 'image/png' }));
       stillURLs.push(url);
+      const index = stills.length;
+      stills.push({ url, start: sm.start });
       const fig = document.createElement('figure');
+      const open = document.createElement('button');
+      open.type = 'button';
+      open.className = 'still';
+      open.setAttribute('aria-label', 'Show the still at ' + clock(sm.start) + ' at full size');
+      open.addEventListener('click', () => openLightbox(index, open));
       const img = document.createElement('img');
       img.alt = 'Preview at ' + clock(sm.start);
       img.width = s.width;
       img.height = s.height;
       img.addEventListener('load', () => { img.dataset.size = img.naturalWidth + 'x' + img.naturalHeight; });
       img.src = url;
+      open.append(img);
       const cap = document.createElement('figcaption');
       cap.textContent = clock(sm.start);
-      fig.append(img, cap);
+      fig.append(open, cap);
       stillsBox.append(fig);
     }
     const estimate = probe.duration ? header + (data / seconds) * probe.duration : null;
-    const picture = s.mode === 'video' ? ', ' + s.width + ' x ' + s.height + (s.fps ? ' at ' + s.fps + ' fps' : '') : '';
-    estimateText.textContent = (estimate ? 'About ' + mb(estimate) : 'Unknown size') + picture;
-    if (estimate) estimateText.dataset.bytes = String(Math.round(estimate)); else delete estimateText.dataset.bytes;
+    showEstimate(s, estimate);
     previewBox.dataset.seconds = ((performance.now() - started) / 1000).toFixed(1);
-    estimateWarning.hidden = true;
-    if (estimate > MAX_BYTES) {
-      estimateWarning.textContent = 'This is over the 128 MB the game plays. A lower bitrate makes the file smaller.';
-      estimateWarning.hidden = false;
-    } else if (estimate > SERVER_SEND_BYTES) {
-      estimateWarning.textContent = sizeWarning.textContent;
-      estimateWarning.hidden = false;
-    }
     previewBox.dataset.state = previewAgain ? 'pending' : 'done';
   } catch (e) {
     if (token !== previewToken) return;
@@ -414,9 +564,40 @@ async function runPreview() {
   } finally {
     if (token === previewToken) {
       previewRunning = false;
+      previewProgressBox.hidden = true;
       if (previewAgain) runPreview();
     }
   }
+}
+
+// Lightbox: a still at its real size (smaller only to fit the screen), arrows or swipes step through the stills
+function showLightbox(index) {
+  lightboxIndex = (index + stills.length) % stills.length;
+  const st = stills[lightboxIndex];
+  lbImg.src = st.url;
+  lbImg.alt = 'Preview at ' + clock(st.start);
+  lbCap.textContent = clock(st.start);
+  lbImg.onload = () => {
+    lbImg.dataset.size = lbImg.naturalWidth + 'x' + lbImg.naturalHeight;
+    lbCap.textContent = clock(st.start) + ', ' + lbImg.naturalWidth + ' x ' + lbImg.naturalHeight;
+  };
+  lbPrev.hidden = lbNext.hidden = stills.length < 2;
+}
+
+function openLightbox(index, from) {
+  if (!stills.length) return;
+  lightboxReturn = from || null;
+  showLightbox(index);
+  lightbox.hidden = false;
+  document.body.classList.add('lightbox-open');
+  lbClose.focus();
+}
+
+function closeLightbox() {
+  if (lightbox.hidden) return;
+  lightbox.hidden = true;
+  document.body.classList.remove('lightbox-open');
+  if (lightboxReturn) lightboxReturn.focus();
 }
 
 function setBusy(on) {
@@ -586,4 +767,30 @@ for (const el of [widthIn, fpsIn, bitrateIn, qualityIn]) el.addEventListener('in
 convertBtn.addEventListener('click', convert);
 cancelBtn.addEventListener('click', cancel);
 saveBtn.addEventListener('click', save);
+previewRun.addEventListener('click', () => { if (!previewRunning) runPreview(true); });
+lbClose.addEventListener('click', closeLightbox);
+lbPrev.addEventListener('click', () => showLightbox(lightboxIndex - 1));
+lbNext.addEventListener('click', () => showLightbox(lightboxIndex + 1));
+lightbox.addEventListener('click', (e) => { if (e.target === lightbox || e.target.classList.contains('lb-stage')) closeLightbox(); });
+document.addEventListener('keydown', (e) => {
+  if (lightbox.hidden) return;
+  if (e.key === 'Escape') closeLightbox();
+  else if (e.key === 'ArrowLeft') showLightbox(lightboxIndex - 1);
+  else if (e.key === 'ArrowRight') showLightbox(lightboxIndex + 1);
+  else if (e.key === 'Tab') {
+    // Keep the focus inside the lightbox
+    const buttons = [lbClose, lbPrev, lbNext].filter((b) => !b.hidden);
+    const at = buttons.indexOf(document.activeElement);
+    e.preventDefault();
+    buttons[(at + (e.shiftKey ? -1 : 1) + buttons.length) % buttons.length].focus();
+  }
+});
+let touchX = null;
+lightbox.addEventListener('touchstart', (e) => { touchX = e.touches.length === 1 ? e.touches[0].clientX : null; }, { passive: true });
+lightbox.addEventListener('touchend', (e) => {
+  if (touchX == null || stills.length < 2) return;
+  const dx = e.changedTouches[0].clientX - touchX;
+  touchX = null;
+  if (Math.abs(dx) > 40) showLightbox(lightboxIndex + (dx < 0 ? 1 : -1));
+});
 showMode();
