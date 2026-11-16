@@ -63,6 +63,11 @@ async function checkLightbox(page, shot, touch) {
   const size = await page.getAttribute('#lb-img', 'data-size');
   const box = await page.locator('#lb-img').boundingBox();
   const cap1 = await page.textContent('#lb-cap');
+  // The page behind must not scroll while the lightbox is open
+  const scrollBefore = (await page.locator('h1').boundingBox()).y;
+  await page.mouse.wheel(0, 600);
+  await page.waitForTimeout(200);
+  const scrollAfter = (await page.locator('h1').boundingBox()).y;
   if (shot) await page.screenshot({ path: shot });
   if (touch) await page.tap('#lb-next'); else await page.keyboard.press('ArrowRight');
   await page.waitForTimeout(300);
@@ -72,8 +77,8 @@ async function checkLightbox(page, shot, touch) {
   const closed = await page.isHidden('#lightbox');
   const [w, h] = (size || '0x0').split('x').map(Number);
   // Shown at its real size, or smaller to fit the window, never bigger
-  const ok = closed && cap1 !== cap2 && box && box.width <= w + 1 && box.height <= h + 1;
-  return { size, shown: box && Math.round(box.width) + 'x' + Math.round(box.height), cap1, cap2, closed, ok };
+  const ok = closed && scrollBefore === scrollAfter && cap1 !== cap2 && box && box.width <= w + 1 && box.height <= h + 1;
+  return { size, shown: box && Math.round(box.width) + 'x' + Math.round(box.height), cap1, cap2, closed, ok, scrollBefore, scrollAfter };
 }
 
 // In the slow mode the preview runs on the Preview button: returns the bitrate estimate shown before, then runs it
