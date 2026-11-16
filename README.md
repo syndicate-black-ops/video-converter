@@ -22,7 +22,8 @@ python3 -m http.server 8000
 
 Then open http://localhost:8000/. Opening `index.html` as a file doesn't work.
 
-`test/run.sh` converts two short clips in headless Chromium and checks the files with ffprobe (needs Docker).
+`test/run.sh` converts a set of videos (1080p and 4K MP4, WebM, a phone video, AV1) in headless Chromium and checks the
+files with ffprobe (needs Docker).
 
 ## GitHub Pages
 

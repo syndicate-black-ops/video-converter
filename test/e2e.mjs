@@ -1,19 +1,21 @@
 // Headless test (selectors only: the page's CSP blocks Playwright's string evaluation): converts a clip on the page in Chromium, saves the downloads and takes a screenshot per theme.
-//   node e2e.mjs <page url> <input video> <out dir> <noisy video for the 10 MB warning>
-import { chromium } from 'playwright';
+//   node e2e.mjs <page url> <input video> <out dir> <noisy video for the 10 MB warning> [more videos to convert with the defaults]
+// ONLY_VARIANTS=1 converts only the extra videos.
+import { chromium, firefox } from 'playwright';
 import path from 'node:path';
 
-const [url, input, out, noisy] = process.argv.slice(2);
+const [url, input, out, noisy, ...variants] = process.argv.slice(2);
 const origin = new URL(url).origin;
 const report = { external: [], errors: [], runs: [] };
+const logs = [];
 
-async function open(browser, colorScheme) {
+async function open(browser, colorScheme, query = '') {
   const ctx = await browser.newContext({ colorScheme, viewport: { width: 900, height: 900 }, acceptDownloads: true });
   const page = await ctx.newPage();
   page.on('request', (r) => { if (!r.url().startsWith(origin) && !r.url().startsWith('blob:') && !r.url().startsWith('data:')) report.external.push(r.url()); });
-  page.on('console', (m) => { if (m.type() === 'error') report.errors.push(m.text()); });
+  page.on('console', (m) => { if (m.type() === 'error') report.errors.push(m.text()); else if (process.env.LOGDIR) logs.push(m.text()); });
   page.on('pageerror', (e) => report.errors.push(String(e)));
-  await page.goto(url);
+  await page.goto(url + query);
   return { ctx, page };
 }
 
@@ -41,8 +43,55 @@ async function convert(page, name, opts) {
   report.runs.push({ name, opts, seconds: (Date.now() - t0) / 1000, file, info: await page.textContent('#info'), warning: await page.isVisible('#size-warning'), progress: samples.filter((s, i, a) => s && s !== a[i - 1]).slice(0, 12) });
 }
 
-const browser = await chromium.launch();
+const browser = await (process.env.BROWSER === 'firefox' ? firefox : chromium).launch({ headless: !process.env.HEADED });
+report.browser = (process.env.BROWSER || 'chromium') + (process.env.HEADED ? ' headed' : ' headless') + ' ' + browser.version();
 try {
+  // Extra inputs (WebM kinds): defaults, each must convert
+  if (variants.length) {
+    const v = await open(browser, 'light');
+    for (const f of variants) {
+      logs.length = 0;
+      // Names say what should happen: *av1* gets the AV1 message, *broken* fails, the rest convert
+      const name = 'variant ' + path.basename(f);
+      try {
+        const source = await choose(v.page, f);
+        if (/av1/.test(f) || /broken/.test(f)) {
+          if (await v.page.isEnabled('#convert')) await v.page.click('#convert');
+          if (await v.page.isVisible('#cancel')) await v.page.waitForSelector('#status.error', { state: 'attached', timeout: 600000 });
+          const st = await v.page.textContent('#status');
+          const ok = /av1/.test(f) ? /AV1/.test(st) : /failed|Could not/.test(st);
+          report.runs.push({ name, source, expected: ok ? 'yes' : 'NO', status: st });
+          if (!ok) report.failed = true;
+          continue;
+        }
+        report.runs.push({ name, source });
+        await convert(v.page, name, {});
+      } catch (e) {
+        report.runs.push({ name: 'variant ' + path.basename(f), failed: String(e.message || e).slice(0, 400) });
+        if (process.env.LOGDIR) (await import('node:fs')).writeFileSync(path.join(process.env.LOGDIR, path.basename(f) + '.log'), logs.join('\n'));
+        report.failed = true;
+      }
+    }
+    await v.ctx.close();
+    // A real failed run (AV1, let through by ?debug=av1), then a normal video in the same tab
+    const av1 = variants.find((f) => /av1/.test(f)), ok = variants.find((f) => /sample-5s/.test(f));
+    if (av1 && ok) {
+      const r = await open(browser, 'light', '?debug=av1');
+      await choose(r.page, av1);
+      await r.page.click('#convert');
+      await r.page.waitForSelector('#status.error', { state: 'attached', timeout: 600000 });
+      report.runs.push({ name: 'recover: AV1 run fails', status: await r.page.textContent('#status') });
+      try {
+        await choose(r.page, ok);
+        await convert(r.page, 'recover: then ' + path.basename(ok), {});
+      } catch (e) {
+        report.runs.push({ name: 'recover: then ' + path.basename(ok), failed: String(e.message || e).slice(0, 400) });
+        report.failed = true;
+      }
+      await r.ctx.close();
+    }
+  }
+  if (!process.env.ONLY_VARIANTS) {
   // Light: default video conversion, validation messages, cancel, a second video with width and fps set
   const light = await open(browser, 'light');
   report.source = await choose(light.page);
@@ -73,7 +122,9 @@ try {
   await convert(dark.page, 'sound only', { mode: 'audio' });
   await dark.page.screenshot({ path: path.join(out, 'page-dark.png'), fullPage: true });
   await dark.ctx.close();
+  }
 } finally {
   await browser.close();
   console.log(JSON.stringify(report, null, 2));
 }
+if (report.failed || report.errors.length || report.external.length) process.exit(1);
