@@ -11,7 +11,7 @@ https://syndicate-black-ops.github.io/video-converter/
 2. Change the settings if you want to, and click Convert
 3. Click Save, and put the file in your map's folder in `Half-Life/syndicate/video`
 
-The [Video page](https://syndicate-black-ops.github.io/docs/mapping/features/video#making-a-video-file) of the docs
+The [Video page](https://sbo.sbotnas.io/mapping/features/video#making-a-video-file) of the docs
 explains the settings, the limits and how to play the file in a map.
 
 ## Run it locally
@@ -37,4 +37,4 @@ The page is MIT-0 ([LICENSE](LICENSE)).
 
 - `vendor/ffmpeg/`: `@ffmpeg/ffmpeg` 0.12.15, MIT ([LICENSE](vendor/ffmpeg/LICENSE))
 - `vendor/core/`: `@ffmpeg/core` 0.12.10, FFmpeg built with GPL parts (x264, x265), so GPL 2.0 or later
-  ([COPYING](vendor/core/COPYING)); where its source is: [SOURCE.txt](vendor/core/SOURCE.txt)
+  ([COPYING](vendor/core/COPYING)); its source is attached to the first release ([SOURCE.txt](vendor/core/SOURCE.txt))

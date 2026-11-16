@@ -5,7 +5,27 @@ libvorbis, zlib, libwebp, FreeType, FriBidi, HarfBuzz, libass and zimg, and FFmp
 configured with --enable-gpl, so the files are under the GNU General Public License,
 version 2 or later (COPYING).
 
-Source: the build scripts at
-https://github.com/ffmpegwasm/ffmpeg.wasm/tree/71aa99d37c02a7b4c435275ca9ef50e612f6efa1
-(Dockerfile lists each library and its version) and FFmpeg n5.1.4 at
-https://github.com/FFmpeg/FFmpeg/tree/n5.1.4
+The source of everything in them is attached to the first release of this repository
+(https://github.com/syndicate-black-ops/video-converter/releases), with its SHA256:
+
+53c5842f160cece0e39345876f9483b56aa84b966637ff6f624353a0fa884219  ffmpeg.wasm-71aa99d37c02a7b4c435275ca9ef50e612f6efa1.tar.gz
+54383bb890a1cd62580e9f1eaa8081203196ed53bde9e98fb6b0004423f49063  ffmpeg-5.1.4.tar.xz
+75434a5a1f2d7d4314821c6054dd300731d69e2fa73314ba4a5ec9df38d4ec80  x264-ffmpegwasm-4-cores-33cac6b77d5b9259c552156013a817ab23119612.tar.gz
+e5254828f5db7bc375d385e31247861d25facee87b43fa2d08ea3ab5569672ab  x265-ffmpegwasm-3.4-2bb5520e9596f361bf0ed81b3b8da0d7fd999069.tar.gz
+00dae80465567272abd077f59355f95ac91d7809a2d3006f9ace2637dd429d14  libvpx-1.13.1.tar.gz
+0d97ba0776988f5730e0ce1fa936e7c5d6836c757993ba55073513fe89cf410a  lame-ffmpegwasm-master-2badea1974ae36cb8312afe99cff1e6b3b5decee.tar.gz
+fe5670640bd49e828d64d2879c31cb4dde9758681bb664f9bdbf159a01b0c76e  libogg-1.3.4.tar.gz
+b6ae1ee2fa3d42ac489287d3ec34c5885730b1296f0801ae577a35193d3affbc  libtheora-1.1.1.tar.bz2
+65b58e1e25b2a114157014736a3d9dfeaad8d41be1c8179866f144a2fb44ff9d  opus-1.3.1.tar.gz
+6d747efe7ac4ad249bf711527882cef79fb61d9194c45b5ca5498aa60f290762  libvorbis-1.3.3.tar.gz
+c3e5e9fdd5004dcb542feda5ee4f0ff0744628baf8ed2dd5d66f8ca1197cb1a1  zlib-1.2.11.tar.gz
+2a499607df669e40258e53d0ade8035ba4ec0175244869d1025d460562aa09b4  libwebp-1.3.2.tar.gz
+86a854d8905b19698bbc8f23b860bc104246ce4854dcea8e3b0fb21284f75784  freetype-2.10.4.tar.xz
+c5e47ea9026fb60da1944da9888b4e0a18854a0e2410bbfe7ad90a054d36e0c7  fribidi-1.0.9.tar.xz
+735a94917b47936575acb4d4fa7e7986522f8a89527e4635721474dee2bc942c  harfbuzz-5.2.0.tar.xz
+9f09230c9a0aa68ef7aa6a9e2ab709ca957020f842e52c5b2e52b801a7d9e833  libass-0.15.0.tar.xz
+a9a0226bf85e0d83c41a8ebe4e3e690e1348682f6a2a7838f1b8cbff1b799bcf  zimg-release-3.0.5.tar.gz
+
+The ffmpeg.wasm archive has the build scripts (Dockerfile, build/). The x264, x265 and
+LAME archives are the ffmpegwasm copies the build uses; the others are the upstream
+releases of the versions the Dockerfile names.
